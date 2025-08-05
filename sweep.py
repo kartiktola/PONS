@@ -43,6 +43,7 @@ def run_one(p1, p2, p3, seed, cfg):
         energy_thresh=cfg.energy_thresh,
         pop_thresh=cfg.pop_thresh
     )
+    router.latencies.clear()
     random.seed(seed)
     np.random.seed(seed)
     # generate movement & message‐gen config from your args
@@ -74,7 +75,10 @@ def run_one(p1, p2, p3, seed, cfg):
     used = [n.initial_energy - n.energy for n in nodes]
     energy_used   = sum(used)
     energy_stddev = np.std(used)
-    latencies = router.latencies
+    all_lats = []
+    for n in nodes:
+        all_lats.extend(getattr(n.router, "latencies", []))
+    latencies = all_lats
     median = float(np.median(latencies)) if latencies else 0.0
     p95    = float(np.percentile(latencies,95)) if latencies else 0.0
 
@@ -137,6 +141,8 @@ def main():
 
         # Write aggregated means
         for (p1,p2,p3), runs in results.items():
+            a = p1 / p3
+            b = p2 / p3
             F1s = [r["F1"] for r in runs]
             F2s = [r["F2"] for r in runs]
             F3s = [r["F3"] for r in runs]
@@ -144,7 +150,7 @@ def main():
             F3_ = [r["F3_95"] for r in runs]
             F4s = [r["F4"] for r in runs]
             writer.writerow([
-                f"{p3:.3f}", f"{p3*p1/p3:.3f}", f"{p3*p2/p3:.3f}",
+                f"{p3:.3f}", f"{a:.3f}", f"{b:.3f}",
                 f"{p1:.3f}", f"{p2:.3f}",
                 f"{statistics.mean(F1s):.4f}",
                 f"{statistics.mean(F2s):.1f}",
