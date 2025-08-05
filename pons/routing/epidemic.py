@@ -1,5 +1,6 @@
 from .router import Router
 import random
+from pons.routing.router import Router
 
 class EpidemicRouter(Router):
     """
@@ -27,6 +28,7 @@ class EpidemicRouter(Router):
         self.p3 = p3
         self.energy_thresh = energy_thresh
         self.pop_thresh   = pop_thresh    
+        self.latencies: list[float] = []
 
     def __str__(self):
         return f"EpidemicRouter(p1={self.p1}, p2={self.p2}, p3={self.p3})"
@@ -76,7 +78,27 @@ class EpidemicRouter(Router):
                     self.forward(msg)
 
     def on_msg_received(self, msg, remote_id, was_known):
-        """Handle reception of a message: store and forward if new and not destined for this node."""
+        """Handle reception of a message: record latency if delivered, then store/forward."""
+        # 1) If this is the true delivery to its destination, record latency
+        if not was_known and msg.dst == self.my_id:
+            delivery_time = self.netsim.env.now
+            latency       = delivery_time - msg.created
+            self.latencies.append(latency)
+
+        # 2) Existing logic: if new and not for me, store and forward
         if not was_known and msg.dst != self.my_id:
             if self.store_add(msg):
                 self.forward(msg)
+    def _on_msg_received(self, msg, remote_id):
+        """
+        Internal hook called for every incoming message (DTN bundle case).
+        We record latency when it arrives at its true destination.
+        """
+        # 1) If this node is the destination, record the latency
+        if msg.dst == self.my_id:
+            now = self.netsim.env.now
+            latency = now - msg.created
+            self.latencies.append(latency)
+
+        # 2) Call the base implementation to maintain normal stats & behavior
+        super(EpidemicRouter, self)._on_msg_received(msg, remote_id)

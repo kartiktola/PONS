@@ -17,6 +17,7 @@ parser.add_argument("--p3",        type=float, default=0.5, help="Forward prob p
 parser.add_argument("--seed",      type=int,   default=42,  help="RNG seed")
 parser.add_argument("--energy_thresh", type=float, default=0.0, help="Min energy to allow forwarding")
 parser.add_argument("--pop_thresh",    type=float, default=0.0,help="Min popularity to allow forwarding")
+parser.add_argument("--net_range", type=float, default=50.0, help="Communication radius (m)")
 
 args = parser.parse_args()
 
@@ -38,15 +39,15 @@ moves = pons.generate_randomwaypoint_movement(
 )
 
 # ─── 4. Configure network & router ───────────────────────────────────────────
-net = pons.NetworkSettings("WIFI_50m", range=NET_RANGE)
-
-# TODO: ensure EpidemicRouter.__init__ accepts p1, p2, p3 parameters
+net = pons.NetworkSettings("WIFI_50m", range=args.net_range)
 epidemic = pons.routing.EpidemicRouter(
-    capacity=CAPACITY,
-    p1=args.p1,
-    p2=args.p2,
-    p3=args.p3
-)
+     capacity=CAPACITY,
+     p1=args.p1,
+     p2=args.p2,
+     p3=args.p3,
+    energy_thresh=args.energy_thresh,
+    pop_thresh=args.pop_thresh
+ )
 
 nodes = pons.generate_nodes(
     NUM_NODES,
@@ -93,3 +94,18 @@ energy_stddev = float(np.std(used))
 
 print(f"energy_used: {energy_used:.3f}")
 print(f"energy_stddev: {energy_stddev:.3f}")
+# Compute and print latency percentiles
+all_latencies = []
+for node in nodes:
+    # each node.router is a deepcopy of epidemic
+    all_latencies.extend(getattr(node.router, "latencies", []))
+lat_list = all_latencies
+
+if lat_list:
+    median = float(np.median(lat_list))
+    p95    = float(np.percentile(lat_list, 95))
+else:
+    median = p95 = 0.0
+
+print(f"latency_median: {median:.3f}")
+print(f"latency_p95:    {p95:.3f}")

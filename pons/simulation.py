@@ -1,3 +1,4 @@
+import threading
 import time
 from typing import List, Dict, Optional, Tuple
 from copy import deepcopy
@@ -29,7 +30,7 @@ def printProgressBar(
     suffix="",
     decimals=1,
     length=100,
-    fill="█",
+    fill="#",
     printEnd="\r",
 ):
     """
@@ -267,7 +268,8 @@ class NetSim(object):
             logger.info("Stopping simulation...")
             aborted = True
 
-        signal.signal(signal.SIGINT, signal_handler)
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, signal_handler)
 
         all_contactplans = set()
         for n in self.nodes.values():

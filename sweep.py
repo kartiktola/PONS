@@ -1,121 +1,159 @@
 #!/usr/bin/env python
 # sweep.py
 
-import argparse
-import csv
-import json
-import subprocess
-import random
-import statistics
-import sys
-import time
-from pathlib import Path
+import argparse, csv, json, random, statistics, sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pons.simulation import run_simulation
+import numpy as np
+import pons
+from pons.routing.epidemic import EpidemicRouter
+from pons.node import generate_nodes
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Comprehensive batch sweep of sim.py over (p3,a,b)")
-    p.add_argument("--sim",      default="python sim.py", help="Command to invoke sim.py")
-    p.add_argument("--router",   default="p_epidemic",    help="Router to pass to --routing")
-    p.add_argument("--nodes",    type=int, default=100,   help="Number of nodes")
-    p.add_argument("--duration", type=int, default=86400, help="Simulation duration (s)")
-    p.add_argument("--energy_thresh", type=float, default=0.0, help="Minimum energy threshold")
-    p.add_argument("--pop_thresh",    type=float, default=0.0, help="Minimum popularity threshold")
-    p.add_argument("--grid",     type=int, default=5,    help="Grid resolution per axis")
-    p.add_argument("--runs",     type=int, default=10,   help="Runs per grid cell")
-    p.add_argument("--out",      default="results.csv", help="Output CSV file")
-    p.add_argument("--logfile",  default=None,          help="File to log errors")
-    p.add_argument("--extras",   nargs=argparse.REMAINDER, help="Extra flags for sim.py")
+    p = argparse.ArgumentParser(description="Batch sweep of sim.py over (p1,p2,p3)")
+    p.add_argument("--sim", default=".venv/Scripts/python sim.py", help="Command to invoke sim.py")
+    p.add_argument("--nodes",  type=int, default=100)
+    p.add_argument("--duration", type=int, default=86400)
+    p.add_argument("--grid",   type=int, default=10)
+    p.add_argument("--runs",   type=int, default=20)
+    p.add_argument("--timeout", type=int, default=300,
+                   help="Per‐run timeout in seconds")
+    p.add_argument("--workers", type=int, default=4,
+                   help="Parallel worker threads")
+    p.add_argument("--capacity", type=int, default=0, help="Buffer capacity for router")
+    p.add_argument("--energy_thresh", type=float, default=0.0,
+                   help="Min energy to allow forwarding")
+    p.add_argument("--pop_thresh",    type=float, default=0.0,
+                   help="Min popularity to allow forwarding")
+    p.add_argument("--world_width",   type=float, default=1000.0,
+                   help="Width of simulation area")
+    p.add_argument("--world_height",  type=float, default=1000.0,
+                   help="Height of simulation area")
+    p.add_argument("--max_pause",     type=float, default=60.0,
+                   help="Max pause time for RandomWaypoint")
+    p.add_argument("--net_range", type=float, default=50.0,
+              help="Communication radius (m)")
+    p.add_argument("--out",    default="results.csv")
     return p.parse_args()
 
 def run_one(p1, p2, p3, seed, cfg):
-    cmd = cfg.sim.split() + [
-        "--routing",    cfg.router,
-        "--nodes",      str(cfg.nodes),
-        "--duration",   str(cfg.duration),
-        "--p1",         f"{p1:.4f}",
-        "--p2",         f"{p2:.4f}",
-        "--p3",         f"{p3:.4f}",
-        "--seed",       str(seed),
-        "--energy_thresh", str(cfg.energy_thresh),
-        "--pop_thresh",    str(cfg.pop_thresh)
-    ] + (cfg.extras or [])
-    try:
-        out = subprocess.check_output(cmd, text=True, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        msg = f"[ERROR] cmd={' '.join(cmd)}\n{e.stderr}"
-        if cfg.logfile:
-            with open(cfg.logfile, "a") as logf:
-                logf.write(msg + "\n")
-        else:
-            print(msg, file=sys.stderr)
-        return None
+    # build a router with p1,p2,p3 and thresholds
+    router = EpidemicRouter(
+        p1=p1, p2=p2, p3=p3,
+        energy_thresh=cfg.energy_thresh,
+        pop_thresh=cfg.pop_thresh
+    )
+    random.seed(seed)
+    np.random.seed(seed)
+    # generate movement & message‐gen config from your args
+    moves = pons.generate_randomwaypoint_movement(
+        cfg.duration,
+        cfg.nodes,
+        int(cfg.world_size[0]),    # ← cast to int
+        int(cfg.world_size[1]),    # ← cast to int
+        max_pause=cfg.max_pause
+    )
+    msggens = [cfg.msggenconfig]
+    # run the sim
+    stats, nodes = run_simulation(
+        router=router,
+        num_nodes=cfg.nodes,
+        sim_time=cfg.duration,
+        world_size=cfg.world_size,
+        movements=moves,
+        msggens=msggens,
+        config={
+            "movement_logger": False,
+            "peers_logger":   False,
+            "event_logging":  False,
+            "net": [ pons.NetworkSettings("WIFI_50m", range=cfg.net_range) ]
+            }
 
-    lines = [l.strip() for l in out.splitlines() if l.strip()]
-    stats = json.loads(lines[-3])
-    energy_used   = float(next(l for l in lines if l.startswith("energy_used:")).split()[-1])
-    energy_stddev = float(next(l for l in lines if l.startswith("energy_stddev:")).split()[-1])
+    )
+    # compute energy & latency percentiles exactly as before
+    used = [n.initial_energy - n.energy for n in nodes]
+    energy_used   = sum(used)
+    energy_stddev = np.std(used)
+    latencies = router.latencies
+    median = float(np.median(latencies)) if latencies else 0.0
+    p95    = float(np.percentile(latencies,95)) if latencies else 0.0
+
     return {
         "F1": stats["delivery_prob"],
         "F2": energy_used,
         "F3": stats["latency_avg"],
         "F4": energy_stddev,
+        "F3_med": median,
+        "F3_95": p95
     }
 
 def main():
     cfg = parse_args()
-    start_time = time.time()
+        # pack world_size tuple
+    cfg.world_size = (cfg.world_width, cfg.world_height)
 
-    # prepare output file
-    out_path = Path(cfg.out)
-    first_write = not out_path.exists()
-    with out_path.open("a", newline="") as f:
+    # message generator config (matches sim.py defaults)
+    cfg.msggenconfig = {
+        "type":     "single",
+        "interval": 30,
+        "src":      (0, cfg.nodes),
+        "dst":      (0, cfg.nodes),
+        "size":     100,
+        "id":       "M",
+        "ttl":      cfg.duration,
+    }
+
+    vals = [i/cfg.grid for i in range(1, cfg.grid+1)]
+    fieldnames = ["p3","a","b","p1","p2","F1","F2","F3","F3_med","F3_95","F4"]
+    with open(cfg.out, "w", newline="") as f:
         writer = csv.writer(f)
-        if first_write:
-            writer.writerow(["p3","a","b","p1","p2","F1","F2","F3","F4"])
-
-        vals = [i/cfg.grid for i in range(1, cfg.grid+1)]
-        total_cells = sum(1 for p3 in vals for a in vals for b in vals if a <= b)
-        cell_count = 0
-
+        writer.writerow(fieldnames)
+        # Prepare tasks
+        tasks = []
         for p3 in vals:
             for a in vals:
                 for b in vals:
-                    if a > b:
-                        continue
-                    cell_count += 1
-                    p1, p2 = p3*a, p3*b
-
-                    # run multiple seeds
-                    results = {k: [] for k in ("F1","F2","F3","F4")}
-                    t0 = time.time()
+                    if a > b: continue
+                    p1 = p3*a; p2 = p3*b
                     for _ in range(cfg.runs):
                         seed = random.randrange(1_000_000)
-                        res = run_one(p1, p2, p3, seed, cfg)
-                        if res:
-                            for k,v in res.items():
-                                results[k].append(v)
-                    elapsed = time.time() - t0
+                        tasks.append((p1,p2,p3,seed))
 
-                    if not results["F1"]:
-                        continue
+        # Parallel execution
+        with ProcessPoolExecutor(max_workers=cfg.workers) as exe:
+            futures = {
+                exe.submit(run_one, p1, p2, p3, seed, cfg): (p1,p2,p3)
+                for (p1,p2,p3,seed) in tasks
+                }
+            # Aggregate per‐config
+            results = {}
+            for fut in as_completed(futures):
+                p1,p2,p3 = futures[fut]
+                res = fut.result()
+                if not res: 
+                    continue
+                key = (p1,p2,p3)
+                results.setdefault(key, []).append(res)
 
-                    # average metrics
-                    row = [
-                        f"{p3:.3f}", f"{a:.3f}", f"{b:.3f}",
-                        f"{p1:.3f}", f"{p2:.3f}",
-                        f"{statistics.mean(results['F1']):.4f}",
-                        f"{statistics.mean(results['F2']):.1f}",
-                        f"{statistics.mean(results['F3']):.1f}",
-                        f"{statistics.mean(results['F4']):.1f}"
-                    ]
-                    writer.writerow(row)
-                    f.flush()
+        # Write aggregated means
+        for (p1,p2,p3), runs in results.items():
+            F1s = [r["F1"] for r in runs]
+            F2s = [r["F2"] for r in runs]
+            F3s = [r["F3"] for r in runs]
+            F3m = [r["F3_med"] for r in runs]
+            F3_ = [r["F3_95"] for r in runs]
+            F4s = [r["F4"] for r in runs]
+            writer.writerow([
+                f"{p3:.3f}", f"{p3*p1/p3:.3f}", f"{p3*p2/p3:.3f}",
+                f"{p1:.3f}", f"{p2:.3f}",
+                f"{statistics.mean(F1s):.4f}",
+                f"{statistics.mean(F2s):.1f}",
+                f"{statistics.mean(F3s):.1f}",
+                f"{statistics.mean(F3m):.1f}",
+                f"{statistics.mean(F3_):.1f}",
+                f"{statistics.mean(F4s):.1f}",
+            ])
+            print(f"Done p1={p1:.3f} p2={p2:.3f} p3={p3:.3f}")
 
-                    # progress
-                    done = cell_count/total_cells*100
-                    eta = (time.time() - start_time)/cell_count*(total_cells-cell_count)
-                    print(f"[{done:5.1f}%] p3={p3:.3f}, a={a:.3f}, b={b:.3f} "
-                          f"({cell_count}/{total_cells}) "
-                          f"{elapsed:.1f}s/point, ETA {eta/60:.1f}m")
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
