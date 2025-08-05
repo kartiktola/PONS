@@ -1,45 +1,76 @@
+import argparse
 import random
 import json
-
-# import cProfile
+import numpy as np
 
 import pons
 import pons.routing
 
-RANDOM_SEED = 42
-# SIM_TIME = 3600*24*7
-SIM_TIME = 3600 * 24
-NET_RANGE = 50
-NUM_NODES = 10
-WORLD_SIZE = (1000, 1000)
-CAPACITY = 10000
-# CAPACITY = 0
+# ─── 1. Parse command-line args ──────────────────────────────────────────────
+parser = argparse.ArgumentParser(description="PONS Simulator with params")
+parser.add_argument("--routing",   type=str,   default="epidemic")
+parser.add_argument("--nodes",     type=int,   default=10)
+parser.add_argument("--duration",  type=int,   default=3600*24)
+parser.add_argument("--p1",        type=float, default=0.1, help="Forward prob p1")
+parser.add_argument("--p2",        type=float, default=0.2, help="Forward prob p2")
+parser.add_argument("--p3",        type=float, default=0.5, help="Forward prob p3")
+parser.add_argument("--seed",      type=int,   default=42,  help="RNG seed")
+parser.add_argument("--energy_thresh", type=float, default=0.0, help="Min energy to allow forwarding")
+parser.add_argument("--pop_thresh",    type=float, default=0.0,help="Min popularity to allow forwarding")
 
-# Setup and start the simulation
+args = parser.parse_args()
+
+# ─── 2. Simulation constants ─────────────────────────────────────────────────
+RANDOM_SEED = args.seed
+SIM_TIME    = args.duration
+NUM_NODES   = args.nodes
+WORLD_SIZE  = (1000, 1000)
+NET_RANGE   = 50
+CAPACITY    = 10000
+
 print("Python Opportunistic Network Simulator")
 random.seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
 
-
+# ─── 3. Generate movement ────────────────────────────────────────────────────
 moves = pons.generate_randomwaypoint_movement(
     SIM_TIME, NUM_NODES, WORLD_SIZE[0], WORLD_SIZE[1], max_pause=60.0
 )
 
+# ─── 4. Configure network & router ───────────────────────────────────────────
 net = pons.NetworkSettings("WIFI_50m", range=NET_RANGE)
-epidemic = pons.routing.EpidemicRouter(capacity=CAPACITY)
 
-nodes = pons.generate_nodes(NUM_NODES, net=[net], router=epidemic)
-config = {"movement_logger": False, "peers_logger": False, "event_logging": False}
+# TODO: ensure EpidemicRouter.__init__ accepts p1, p2, p3 parameters
+epidemic = pons.routing.EpidemicRouter(
+    capacity=CAPACITY,
+    p1=args.p1,
+    p2=args.p2,
+    p3=args.p3
+)
 
-msggenconfig = {
-    "type": "single",
-    "interval": 30,
-    "src": (0, NUM_NODES),
-    "dst": (0, NUM_NODES),
-    "size": 100,
-    "id": "M",
-    "ttl": 3600,
+nodes = pons.generate_nodes(
+    NUM_NODES,
+    net=[net],
+    router=epidemic
+)
+
+config = {
+    "movement_logger": False,
+    "peers_logger":   False,
+    "event_logging":  False
 }
 
+msggenconfig = {
+    "type":     "single",
+    "interval": 30,
+    "src":      (0, NUM_NODES),
+    "dst":      (0, NUM_NODES),
+    "size":     100,
+    "id":       "M",
+    "ttl":      SIM_TIME,
+}
+
+# ─── 5. Setup & run ──────────────────────────────────────────────────────────
 netsim = pons.NetSim(
     SIM_TIME,
     nodes,
@@ -48,12 +79,17 @@ netsim = pons.NetSim(
     config=config,
     msggens=[msggenconfig],
 )
-
 netsim.setup()
-
-
-# cProfile.run("netsim.run()")
 netsim.run()
 
-print(json.dumps(netsim.net_stats, indent=4))
+# ─── 6. Print built-in stats ─────────────────────────────────────────────────
+print(json.dumps(netsim.net_stats,     indent=4))
 print(json.dumps(netsim.routing_stats, indent=4))
+
+# ─── 7. Compute & print energy metrics ───────────────────────────────────────
+used = [n.initial_energy - n.energy for n in nodes]
+energy_used   = float(np.sum(used))
+energy_stddev = float(np.std(used))
+
+print(f"energy_used: {energy_used:.3f}")
+print(f"energy_stddev: {energy_stddev:.3f}")

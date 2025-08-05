@@ -9,7 +9,6 @@ from pons.event_log import event_log, open_log, close_log, is_logging
 import pons.event_log
 from simpy import Environment
 from simpy.rt import RealtimeEnvironment
-
 import pons
 from pons.node import Node
 from pons.event_log import event_log
@@ -424,3 +423,43 @@ class NetSim(object):
         )
 
         close_log()
+
+
+def run_simulation(
+    router,
+    num_nodes: int,
+    sim_time: float,
+    world_size: Tuple[float, float] = (0, 0),
+    movements: Optional[list] = None,
+    msggens: Optional[list] = None,
+    config: Optional[dict] = None
+) -> Tuple[Dict, List[Node]]:
+    """
+    Set up and execute one DTN simulation using NetSim.
+
+    Returns:
+      stats: merged dict of net_stats and routing_stats
+      nodes: list of Node instances after the run
+    """
+    # 1. Build the simulator
+    ns = NetSim(
+        duration=int(sim_time),
+        nodes=[
+            Node(i, net=deepcopy(config.get("net", [])), router=deepcopy(router))
+            for i in range(num_nodes)
+        ],
+        world_size=world_size,
+        movements=movements,
+        msggens=msggens,
+        config=config or {},
+    )
+
+    # 2. Initialize and run
+    ns.setup()
+    ns.run()
+
+    # 3. Aggregate stats
+    stats = { **ns.net_stats, **ns.routing_stats }
+
+    # 4. Return results and node list
+    return stats, list(ns.nodes.values())
