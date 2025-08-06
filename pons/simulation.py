@@ -361,13 +361,13 @@ class NetSim(object):
                 print()
                 last_real = now_real
                 last_sim = now_sim
-            printProgressBar(
-                now_sim,
-                self.duration,
-                prefix="Progress:",
-                suffix="Complete",
-                length=50,
-            )
+            # printProgressBar(
+            #     now_sim,
+            #     self.duration,
+            #     prefix="Progress:",
+            #     suffix="Complete",
+            #     length=50,
+            # )
 
         # self.env.run(until=self.duration)
         now_real = time.time()
