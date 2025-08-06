@@ -18,7 +18,7 @@ def parse_args():
     p.add_argument("--runs",   type=int, default=20)
     p.add_argument("--timeout", type=int, default=300,
                    help="Per‐run timeout in seconds")
-    p.add_argument("--workers", type=int, default=4,
+    p.add_argument("--workers", type=int, default=10,
                    help="Parallel worker threads")
     p.add_argument("--capacity", type=int, default=0, help="Buffer capacity for router")
     p.add_argument("--energy_thresh", type=float, default=0.0,
