@@ -361,6 +361,7 @@ class NetSim(object):
                 print()
                 last_real = now_real
                 last_sim = now_sim
+                #new commit
             # printProgressBar(
             #     now_sim,
             #     self.duration,
