@@ -2,3 +2,5 @@ networkx~=3.3
 simpy~=4.1.1
 python-dateutil~=2.9.0.post0
 networkx
+psutil>=5.9,<6
+
