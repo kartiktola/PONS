@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 # sweep.py
 
-import argparse, csv, random, statistics, sys
-from concurrent.futures import ProcessPoolExecutor
+import argparse, csv, random, statistics, sys, os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections import defaultdict
 from pons.simulation import run_simulation
 import numpy as np
 import pons
@@ -14,8 +15,8 @@ def parse_args():
     p.add_argument("--duration",    type=int,   default=86400)
     p.add_argument("--grid",        type=int,   default=10)
     p.add_argument("--runs",        type=int,   default=20)
-    p.add_argument("--workers",     type=int,   default=10,
-                   help="Parallel worker threads")
+    p.add_argument("--workers",     type=int,   default=None,
+                   help="Parallel worker processes (default: auto = min(physical_cores-1, 14))")
     p.add_argument("--energy_thresh", type=float, default=0.0)
     p.add_argument("--pop_thresh",    type=float, default=0.0)
     p.add_argument("--world_width",   type=float, default=1000.0)
@@ -88,6 +89,20 @@ def run_one(params):
 
 def main():
     cfg = parse_args()
+
+    # --- Auto workers: respect user value, otherwise pick min(phys-1, 14)
+    if cfg.workers is None:
+        try:
+            import psutil
+            phys = psutil.cpu_count(logical=False)
+        except Exception:
+            phys = None
+        logical = os.cpu_count() or 1
+        if not phys:
+            phys = max(1, logical // 2)
+        cfg.workers = max(1, min(14, phys - 1))
+    print(f"[sweep] Using workers={cfg.workers}")
+
     cfg.world_size = (cfg.world_width, cfg.world_height)
     cfg.msggenconfig = {
         "type":     "single",
@@ -118,51 +133,81 @@ def main():
                     ))
 
     total_tasks = len(tasks)
+    # number of unique (p1,p2,p3) configs:
+    unique_configs = sum(1 for _p3 in vals for _a in vals for _b in vals if _a <= _b)
+
     header = ["p3","a","b","p1","p2","F1","F2","F3","F3_med","F3_95","F4"]
 
-    # Open CSV with line buffering
+    # Open CSV with line buffering; write header immediately
     with open(cfg.out, "w", newline="", buffering=1) as f:
         writer = csv.writer(f)
         writer.writerow(header)
         f.flush()
 
-        # Run all tasks in parallel, in-order, with a modest chunksize
-        results = {}
-        completed = 0
-        chunksize = max(1, len(tasks) // (cfg.workers * 4))
+        # Incremental aggregation: write each row as soon as its 'runs' are complete
+        aggregates = defaultdict(lambda: {
+            "count": 0,
+            "sum_F1": 0.0, "sum_F2": 0.0, "sum_F3": 0.0, "sum_F4": 0.0,
+            "sum_F3_med": 0.0, "sum_F3_95": 0.0
+        })
 
+        completed_tasks = 0
+        completed_configs = 0
+
+        print(f"[sweep] Total sims: {total_tasks} | Unique configs: {unique_configs}")
+
+        # Use as_completed so one failed sim doesn't kill the whole run
         with ProcessPoolExecutor(max_workers=cfg.workers) as exe:
-            for p1, p2, p3, res in exe.map(run_one, tasks, chunksize=chunksize):
-                completed += 1
+            future_to_key = {
+                exe.submit(run_one, params): (params[0], params[1], params[2])  # (p1,p2,p3)
+                for params in tasks
+            }
+
+            for fut in as_completed(future_to_key):
+                p1, p2, p3 = future_to_key[fut]
+                try:
+                    _p1, _p2, _p3, res = fut.result()
+                except Exception as e:
+                    completed_tasks += 1
+                    print(f"[{completed_tasks}/{total_tasks}] ERROR for p1={p1:.3f}, p2={p2:.3f}, p3={p3:.3f}: {e}", file=sys.stderr)
+                    continue
+
+                completed_tasks += 1
                 key = (p1, p2, p3)
-                results.setdefault(key, []).append(res)
-                print(f"[{completed}/{total_tasks}] done p1={p1:.3f}, p2={p2:.3f}, p3={p3:.3f}")
+                agg = aggregates[key]
+                agg["count"]      += 1
+                agg["sum_F1"]     += res["F1"]
+                agg["sum_F2"]     += res["F2"]
+                agg["sum_F3"]     += res["F3"]
+                agg["sum_F4"]     += res["F4"]
+                agg["sum_F3_med"] += res["F3_med"]
+                agg["sum_F3_95"]  += res["F3_95"]
 
-        # Write aggregated means, flushing every 20 rows
-        row_count = 0
-        for (p1, p2, p3), runs in results.items():
-            a, b = p1 / p3, p2 / p3
-            F1s = [r["F1"] for r in runs]
-            F2s = [r["F2"] for r in runs]
-            F3s = [r["F3"] for r in runs]
-            F3m = [r["F3_med"] for r in runs]
-            F3_ = [r["F3_95"] for r in runs]
-            F4s = [r["F4"] for r in runs]
+                print(f"[{completed_tasks}/{total_tasks}] sim done p1={p1:.3f}, p2={p2:.3f}, p3={p3:.3f}  ({agg['count']}/{cfg.runs} for this config)")
 
-            writer.writerow([
-                f"{p3:.3f}", f"{a:.3f}", f"{b:.3f}",
-                f"{p1:.3f}", f"{p2:.3f}",
-                f"{statistics.mean(F1s):.4f}",
-                f"{statistics.mean(F2s):.1f}",
-                f"{statistics.mean(F3s):.1f}",
-                f"{statistics.mean(F3m):.1f}",
-                f"{statistics.mean(F3_):.1f}",
-                f"{statistics.mean(F4s):.1f}",
-            ])
-            row_count += 1
-            if row_count % 20 == 0:
-                f.flush()
-            print(f"→ Wrote aggregate for p1={p1:.3f}, p2={p2:.3f}, p3={p3:.3f}")
+                # If this config reached the target count, write the aggregate row now
+                if agg["count"] >= cfg.runs:
+                    a = p1 / p3 if p3 != 0 else 0.0
+                    b = p2 / p3 if p3 != 0 else 0.0
+                    writer.writerow([
+                        f"{p3:.3f}", f"{a:.3f}", f"{b:.3f}",
+                        f"{p1:.3f}", f"{p2:.3f}",
+                        f"{(agg['sum_F1']/agg['count']):.4f}",
+                        f"{(agg['sum_F2']/agg['count']):.1f}",
+                        f"{(agg['sum_F3']/agg['count']):.1f}",
+                        f"{(agg['sum_F3_med']/agg['count']):.1f}",
+                        f"{(agg['sum_F3_95']/agg['count']):.1f}",
+                        f"{(agg['sum_F4']/agg['count']):.1f}",
+                    ])
+                    f.flush()
+                    completed_configs += 1
+                    print(f"→ [{completed_configs}/{unique_configs}] wrote aggregate for p1={p1:.3f}, p2={p2:.3f}, p3={p3:.3f}")
+                    # free memory for this config
+                    del aggregates[key]
+
+        # If anything was partially filled (crash/stop), you could optionally dump partials here.
+        if aggregates:
+            print(f"[sweep] Note: {len(aggregates)} configs incomplete (less than {cfg.runs} runs each). No rows written for those.")
 
 if __name__ == "__main__":
     main()
