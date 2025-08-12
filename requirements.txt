@@ -4,3 +4,5 @@ python-dateutil~=2.9.0.post0
 networkx
 psutil>=5.9,<6
 
+plotly==6.2.0
+scikit-learn==1.7.1
